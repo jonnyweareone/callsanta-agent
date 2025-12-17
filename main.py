@@ -120,8 +120,8 @@ class SantaAgent:
     
     async def setup_audio(self):
         """Set up audio source and track for TTS playback"""
-        # Create audio source (48kHz mono)
-        self.audio_source = rtc.AudioSource(48000, 1)
+        # Create audio source (24kHz mono - matches Deepgram TTS default)
+        self.audio_source = rtc.AudioSource(24000, 1)
         
         # Create local audio track
         self.audio_track = rtc.LocalAudioTrack.create_audio_track(
@@ -132,7 +132,7 @@ class SantaAgent:
         # Publish the track
         options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         await self.room.local_participant.publish_track(self.audio_track, options)
-        logger.info("Audio track published")
+        logger.info("Audio track published (24kHz)")
     
     async def setup_tts(self):
         """Initialize TTS engines for Santa and Elf"""
@@ -194,11 +194,12 @@ class SantaAgent:
             from pydub import AudioSegment
             
             audio = AudioSegment.from_mp3(str(file_path))
-            audio = audio.set_channels(1).set_frame_rate(48000)
+            # Convert to 24kHz mono to match TTS output
+            audio = audio.set_channels(1).set_frame_rate(24000)
             
             # Get raw audio data
             raw_data = audio.raw_data
-            samples_per_frame = 960  # 20ms at 48kHz
+            samples_per_frame = 480  # 20ms at 24kHz
             
             # Stream audio in chunks
             for i in range(0, len(raw_data), samples_per_frame * 2):
@@ -206,7 +207,7 @@ class SantaAgent:
                 if len(chunk) == samples_per_frame * 2:
                     frame = rtc.AudioFrame(
                         data=chunk,
-                        sample_rate=48000,
+                        sample_rate=24000,
                         num_channels=1,
                         samples_per_channel=samples_per_frame
                     )
@@ -216,7 +217,7 @@ class SantaAgent:
             await asyncio.sleep(0.5)  # Pause after audio
             
         except Exception as e:
-            logger.error(f"Audio playback error: {e}")
+            logger.error(f"Audio playback error: {e}", exc_info=True)
     
     async def listen_for_wishes(self, timeout: float = 15.0) -> str:
         """Listen to the child and transcribe their gift wishes"""
