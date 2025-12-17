@@ -62,7 +62,7 @@ ELF_VOICE = "aura-2-iris-en"       # Young Adult, Cheerful, Positive - perfect f
 
 # Santa voice modifications
 SANTA_PITCH_SEMITONES = -3   # Lower pitch (negative = deeper)
-SANTA_SPEED_FACTOR = 0.85    # Slower speech (< 1 = slower)
+SANTA_SPEED_FACTOR = 0.95    # Slower speech (< 1 = slower)
 
 
 # =============================================================================
