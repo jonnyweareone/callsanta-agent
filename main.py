@@ -416,7 +416,6 @@ if __name__ == "__main__":
     
     cli.run_app(
         WorkerOptions(
-            agent_name="call-santa",
             entrypoint_fnc=entrypoint,
             request_fnc=request_handler,
         )
