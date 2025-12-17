@@ -59,8 +59,8 @@ BELLS_RINGING_AUDIO = AUDIO_DIR / "bells-ringing.mp3"
 
 # Voice configurations
 ELF_VOICE = "aura-2-iris-en"  # Deepgram - for Elf narration
-# George voice - British, Warm, Captivating Storyteller (works on free tier)
-SANTA_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
+# ElevenLabs Santa Claus voice (requires paid tier)
+SANTA_VOICE_ID = "Gqe8GJJLg3haJkTwYj2L"
 
 # Activity narrations and sounds
 ACTIVITY_CONFIG = {
