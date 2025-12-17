@@ -1,0 +1,9 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "./Dockerfile"
+watchPatterns = ["*.py", "requirements.txt", "Dockerfile", "audio/*"]
+
+[deploy]
+startCommand = "python main.py start"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
