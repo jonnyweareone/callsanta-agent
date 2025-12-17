@@ -453,6 +453,9 @@ class SantaAgent:
             "Pick an activity to try!"
         )
         
+        # Enable activities after elf finishes speaking
+        await self.send_data({"type": "activities_enabled"})
+        
         # Wait for conversation to complete or timeout
         timeout = 300  # 5 minutes max
         start_time = asyncio.get_event_loop().time()
