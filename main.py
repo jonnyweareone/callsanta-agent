@@ -1,18 +1,15 @@
 """
-🎅 Call Santa Agent
-==================
+🎅 Call Santa Agent v2
+======================
 
-A magical LiveKit voice agent that lets children talk to Santa Claus.
+A magical LiveKit voice agent with ElevenLabs Santa voice.
 
 Flow:
-1. Elf greeting → "Hi {name}! I'm Happy the Elf!"
-2. Jingle bells audio
-3. Santa greeting → "Ho Ho Ho! Hello {name}!"
-4. Santa asks → "What would you like for Christmas?"
-5. Listen to child (STT)
-6. Thinking music → "Let me check my list..."
-7. Santa response → "I'll check with your {relationship}!"
-8. Goodbye → "Merry Christmas! Ho Ho Ho!"
+1. Elf greeting (Deepgram) → Welcomes child
+2. Child does activities in 3D grotto  
+3. When ready, Santa appears (ElevenLabs Santa voice)
+4. Santa conversation
+5. Goodbye and recording saved
 
 Agent name: call-santa
 """
@@ -50,19 +47,102 @@ LIVEKIT_URL = os.getenv("LIVEKIT_URL", "wss://sip.soniqlabs.co.uk")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dtosgubmmdqxbeirtbom.supabase.co")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
-# Audio file paths (bundled in Docker image)
+# Audio file paths
 AUDIO_DIR = Path(__file__).parent / "audio"
 JINGLE_AUDIO = AUDIO_DIR / "christmas-sleigh-bells-jingling-451852.mp3"
 THINKING_AUDIO = AUDIO_DIR / "christmas-themed-riser-451859.mp3"
+REINDEER_AUDIO = AUDIO_DIR / "reindeer-eating.mp3"
+TREE_SPARKLE_AUDIO = AUDIO_DIR / "tree-sparkle.mp3"
+BELLS_RINGING_AUDIO = AUDIO_DIR / "bells-ringing.mp3"
 
-# Voice configurations - Deepgram Aura-2 voices
-SANTA_VOICE = "aura-2-draco-en"    # British, Warm, Baritone - perfect for Santa
-ELF_VOICE = "aura-2-iris-en"       # Young Adult, Cheerful, Positive - perfect for an elf
+# Voice configurations
+ELF_VOICE = "aura-2-iris-en"  # Deepgram - for Elf narration
+SANTA_VOICE_ID = "Gqe8GJJLg3haJkTwYj2L"  # ElevenLabs Santa Claus voice
 
-# Santa voice modifications
-SANTA_PITCH_SEMITONES = -3   # Lower pitch (negative = deeper)
-SANTA_SPEED_FACTOR = 0.95    # Slower speech (< 1 = slower)
+# Activity narrations and sounds
+ACTIVITY_CONFIG = {
+    "feed_reindeer": {
+        "narration": "Ooh look! Dasher and Dancer are so hungry! Let's give them some yummy carrots!",
+        "sound": "reindeer",
+    },
+    "decorate_tree": {
+        "narration": "Wow, let's add some sparkly decorations to the Christmas tree! It's going to be so pretty!",
+        "sound": "sparkle",
+    },
+    "ring_bells": {
+        "narration": "Let's ring the magical sleigh bells! Santa loves the sound of jingle bells!",
+        "sound": "bells",
+    },
+}
+
+
+# =============================================================================
+# ELEVENLABS TTS
+# =============================================================================
+
+async def elevenlabs_speak(text: str, audio_source: rtc.AudioSource) -> None:
+    """Speak using ElevenLabs Santa voice"""
+    import httpx
+    from pydub import AudioSegment
+    import io
+    
+    if not ELEVENLABS_API_KEY:
+        logger.error("ElevenLabs API key not set")
+        return
+    
+    logger.info(f"[SANTA - ElevenLabs] Speaking: {text}")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{SANTA_VOICE_ID}",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_multilingual_v2",
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                        "style": 0.5,
+                        "use_speaker_boost": True
+                    }
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"ElevenLabs error: {response.status_code} - {response.text}")
+                return
+            
+            # Convert MP3 to PCM
+            audio_data = response.content
+            audio = AudioSegment.from_mp3(io.BytesIO(audio_data))
+            audio = audio.set_channels(1).set_frame_rate(24000).set_sample_width(2)
+            
+            # Stream audio
+            raw_data = audio.raw_data
+            samples_per_frame = 480  # 20ms at 24kHz
+            
+            for i in range(0, len(raw_data), samples_per_frame * 2):
+                chunk = raw_data[i:i + samples_per_frame * 2]
+                if len(chunk) == samples_per_frame * 2:
+                    frame = rtc.AudioFrame(
+                        data=chunk,
+                        sample_rate=24000,
+                        num_channels=1,
+                        samples_per_channel=samples_per_frame
+                    )
+                    await audio_source.capture_frame(frame)
+                    await asyncio.sleep(0.02)
+            
+            await asyncio.sleep(0.3)
+            
+    except Exception as e:
+        logger.error(f"ElevenLabs TTS error: {e}", exc_info=True)
 
 
 # =============================================================================
@@ -76,39 +156,37 @@ class SantaAgent:
         self.ctx = ctx
         self.room = ctx.room
         
-        # Parse metadata from the call
+        # Child info
         self.child_name = "friend"
         self.gender = "child"
         self.relationship = "family"
         self.call_id = None
         
-        # STT/TTS instances
-        self.stt: Optional[deepgram.STT] = None
-        self.santa_tts: Optional[deepgram.TTS] = None
+        # TTS
         self.elf_tts: Optional[deepgram.TTS] = None
         
-        # Audio source for TTS playback
+        # Audio
         self.audio_source: Optional[rtc.AudioSource] = None
         self.audio_track: Optional[rtc.LocalAudioTrack] = None
         
         # State
+        self.phase = "elf"  # elf, santa, ended
+        self.activities_completed = []
         self.gift_wishes = ""
         self.call_active = True
         
     def parse_metadata(self):
-        """Extract child info from room metadata or participant metadata"""
+        """Extract child info from room metadata"""
         try:
-            # Try room metadata first
             if self.room.metadata:
                 meta = json.loads(self.room.metadata)
                 self.child_name = meta.get("child_name", self.child_name)
                 self.gender = meta.get("gender", self.gender)
                 self.relationship = meta.get("relationship", self.relationship)
                 self.call_id = meta.get("call_id")
-                logger.info(f"Parsed room metadata: {meta}")
+                logger.info(f"Parsed metadata: {meta}")
                 return
             
-            # Try participant metadata
             for participant in self.room.remote_participants.values():
                 if participant.metadata:
                     meta = json.loads(participant.metadata)
@@ -123,96 +201,78 @@ class SantaAgent:
             logger.error(f"Failed to parse metadata: {e}")
     
     async def setup_audio(self):
-        """Set up audio source and track for TTS playback"""
-        # Create audio source (24kHz mono - matches Deepgram TTS default)
+        """Set up audio track"""
         self.audio_source = rtc.AudioSource(24000, 1)
-        
-        # Create local audio track
-        self.audio_track = rtc.LocalAudioTrack.create_audio_track(
-            "santa-voice",
-            self.audio_source
-        )
-        
-        # Publish the track
+        self.audio_track = rtc.LocalAudioTrack.create_audio_track("santa-voice", self.audio_source)
         options = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
         await self.room.local_participant.publish_track(self.audio_track, options)
-        logger.info("Audio track published (24kHz)")
+        logger.info("Audio track published")
     
     async def setup_tts(self):
-        """Initialize TTS engines for Santa and Elf"""
-        self.santa_tts = deepgram.TTS(
-            model=SANTA_VOICE,
-            api_key=DEEPGRAM_API_KEY,
-        )
-        
+        """Initialize Deepgram TTS for Elf"""
         self.elf_tts = deepgram.TTS(
             model=ELF_VOICE,
             api_key=DEEPGRAM_API_KEY,
         )
-        
-        logger.info(f"TTS initialized - Santa: {SANTA_VOICE}, Elf: {ELF_VOICE}")
+        logger.info(f"Elf TTS initialized: {ELF_VOICE}")
     
-    async def setup_stt(self):
-        """Initialize STT for listening to the child"""
-        self.stt = deepgram.STT(
-            model="nova-2",
-            api_key=DEEPGRAM_API_KEY,
-            language="en",
-        )
-        logger.info("STT initialized")
-    
-    async def speak(self, text: str, voice: str = "santa"):
-        """Speak text using TTS"""
-        tts = self.santa_tts if voice == "santa" else self.elf_tts
-        
-        if not tts or not self.audio_source:
-            logger.error("TTS or audio source not initialized")
+    async def speak_elf(self, text: str):
+        """Speak as Elf using Deepgram"""
+        if not self.elf_tts or not self.audio_source:
+            logger.error("Elf TTS not initialized")
             return
         
-        logger.info(f"[{voice.upper()}] Speaking: {text}")
+        logger.info(f"[ELF] Speaking: {text}")
         
         try:
-            from pydub import AudioSegment
-            import io
-            
-            # Collect all audio frames
             audio_data = bytearray()
-            stream = tts.synthesize(text)
-            sample_rate = 24000
+            stream = self.elf_tts.synthesize(text)
             
             async for audio in stream:
                 if audio.frame:
                     audio_data.extend(audio.frame.data)
-                    sample_rate = audio.frame.sample_rate
             
             if not audio_data:
-                logger.warning("No audio data received from TTS")
                 return
             
-            # Convert to AudioSegment for processing
-            audio_segment = AudioSegment(
-                data=bytes(audio_data),
-                sample_width=2,  # 16-bit
-                frame_rate=sample_rate,
-                channels=1
-            )
+            samples_per_frame = 480
+            for i in range(0, len(audio_data), samples_per_frame * 2):
+                chunk = audio_data[i:i + samples_per_frame * 2]
+                if len(chunk) == samples_per_frame * 2:
+                    frame = rtc.AudioFrame(
+                        data=bytes(chunk),
+                        sample_rate=24000,
+                        num_channels=1,
+                        samples_per_channel=samples_per_frame
+                    )
+                    await self.audio_source.capture_frame(frame)
+                    await asyncio.sleep(0.02)
             
-            # Apply modifications for Santa (deeper & slower)
-            if voice == "santa":
-                # Pitch down (negative semitones = deeper voice)
-                new_sample_rate = int(audio_segment.frame_rate * (2 ** (SANTA_PITCH_SEMITONES / 12.0)))
-                pitched = audio_segment._spawn(audio_segment.raw_data, overrides={'frame_rate': new_sample_rate})
-                pitched = pitched.set_frame_rate(24000)  # Resample back to 24kHz
-                
-                # Slow down by stretching (change speed without affecting pitch further)
-                # We do this by adjusting frame rate then resampling
-                slowed_rate = int(24000 * SANTA_SPEED_FACTOR)
-                slowed = pitched._spawn(pitched.raw_data, overrides={'frame_rate': slowed_rate})
-                audio_segment = slowed.set_frame_rate(24000)
+            await asyncio.sleep(0.3)
             
-            # Stream the processed audio
-            raw_data = audio_segment.raw_data
-            samples_per_frame = 480  # 20ms at 24kHz
+        except Exception as e:
+            logger.error(f"Elf TTS error: {e}", exc_info=True)
+    
+    async def speak_santa(self, text: str):
+        """Speak as Santa using ElevenLabs"""
+        await elevenlabs_speak(text, self.audio_source)
+    
+    async def play_audio_file(self, file_path: Path):
+        """Play an audio file"""
+        if not file_path.exists():
+            logger.warning(f"Audio file not found: {file_path}")
+            return
+        
+        logger.info(f"Playing audio: {file_path.name}")
+        
+        try:
+            from pydub import AudioSegment
+            
+            audio = AudioSegment.from_mp3(str(file_path))
+            audio = audio.set_channels(1).set_frame_rate(24000)
+            
+            raw_data = audio.raw_data
+            samples_per_frame = 480
             
             for i in range(0, len(raw_data), samples_per_frame * 2):
                 chunk = raw_data[i:i + samples_per_frame * 2]
@@ -226,224 +286,208 @@ class SantaAgent:
                     await self.audio_source.capture_frame(frame)
                     await asyncio.sleep(0.02)
             
-            # Small pause after speaking
-            await asyncio.sleep(0.3)
-            
-        except Exception as e:
-            logger.error(f"TTS error: {e}", exc_info=True)
-    
-    async def play_audio_file(self, file_path: Path):
-        """Play an audio file (MP3) through the audio track"""
-        if not file_path.exists():
-            logger.warning(f"Audio file not found: {file_path}")
-            return
-        
-        logger.info(f"Playing audio: {file_path.name}")
-        
-        try:
-            # Use pydub to load and convert audio
-            from pydub import AudioSegment
-            
-            audio = AudioSegment.from_mp3(str(file_path))
-            # Convert to 24kHz mono to match TTS output
-            audio = audio.set_channels(1).set_frame_rate(24000)
-            
-            # Get raw audio data
-            raw_data = audio.raw_data
-            samples_per_frame = 480  # 20ms at 24kHz
-            
-            # Stream audio in chunks
-            for i in range(0, len(raw_data), samples_per_frame * 2):
-                chunk = raw_data[i:i + samples_per_frame * 2]
-                if len(chunk) == samples_per_frame * 2:
-                    frame = rtc.AudioFrame(
-                        data=chunk,
-                        sample_rate=24000,
-                        num_channels=1,
-                        samples_per_channel=samples_per_frame
-                    )
-                    await self.audio_source.capture_frame(frame)
-                    await asyncio.sleep(0.02)  # 20ms per frame
-            
-            await asyncio.sleep(0.5)  # Pause after audio
+            await asyncio.sleep(0.5)
             
         except Exception as e:
             logger.error(f"Audio playback error: {e}", exc_info=True)
     
-    async def listen_for_wishes(self, timeout: float = 15.0) -> str:
-        """Listen to the child and transcribe their gift wishes"""
-        if not self.stt:
-            return ""
-        
-        logger.info("Listening for gift wishes...")
-        
-        wishes = []
-        
+    async def send_data(self, data: dict):
+        """Send data message to frontend"""
         try:
-            # Subscribe to audio from remote participants
-            for participant in self.room.remote_participants.values():
-                for track_pub in participant.track_publications.values():
-                    if track_pub.track and track_pub.kind == rtc.TrackKind.KIND_AUDIO:
-                        # Create STT stream
-                        stream = self.stt.stream()
-                        
-                        # Listen for a duration
-                        start_time = asyncio.get_event_loop().time()
-                        
-                        async for event in stream:
-                            if hasattr(event, 'alternatives') and event.alternatives:
-                                text = event.alternatives[0].transcript
-                                if text:
-                                    wishes.append(text)
-                                    logger.info(f"Heard: {text}")
-                            
-                            # Check timeout
-                            if asyncio.get_event_loop().time() - start_time > timeout:
-                                break
-                        
-                        await stream.aclose()
-                        
+            message = json.dumps(data)
+            await self.room.local_participant.publish_data(
+                message.encode(),
+                reliable=True
+            )
+            logger.info(f"Sent data: {data}")
         except Exception as e:
-            logger.error(f"STT error: {e}")
-        
-        self.gift_wishes = " ".join(wishes)
-        return self.gift_wishes
+            logger.error(f"Failed to send data: {e}")
     
-    async def update_call_status(self, status: str, gift_wishes: str = None):
-        """Update the call record in Supabase"""
-        if not self.call_id or not SUPABASE_SERVICE_KEY:
-            return
-        
+    async def handle_data_message(self, payload: bytes):
+        """Handle incoming data messages from frontend"""
         try:
-            import httpx
+            message = json.loads(payload.decode())
+            logger.info(f"Received: {message}")
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/rpc/update_santa_call",
-                    headers={
-                        "apikey": SUPABASE_SERVICE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "p_room_name": self.room.name,
-                        "p_status": status,
-                        "p_gift_wishes": gift_wishes,
-                    }
-                )
-                logger.info(f"Updated call status to {status}")
+            msg_type = message.get("type")
+            
+            if msg_type == "activity":
+                activity = message.get("activity")
+                child_name = message.get("childName", self.child_name)
+                
+                config = ACTIVITY_CONFIG.get(activity, {})
+                narration = config.get("narration", "Wow, how fun!")
+                sound_type = config.get("sound")
+                
+                # Narrate the activity
+                await self.speak_elf(narration)
+                
+                # Play activity sound effect
+                if sound_type == "reindeer":
+                    await self.play_audio_file(REINDEER_AUDIO)
+                elif sound_type == "sparkle":
+                    await self.play_audio_file(TREE_SPARKLE_AUDIO)
+                elif sound_type == "bells":
+                    await self.play_audio_file(BELLS_RINGING_AUDIO)
+                
+                # Track completion
+                if activity not in self.activities_completed:
+                    self.activities_completed.append(activity)
+                
+                # Notify completion
+                await asyncio.sleep(0.5)
+                await self.send_data({"type": "activity_complete", "activity": activity})
+                
+            elif msg_type == "ready_for_santa":
+                logger.info("Child is ready for Santa!")
+                await self.start_santa_conversation()
                 
         except Exception as e:
-            logger.error(f"Failed to update call status: {e}")
+            logger.error(f"Failed to handle data: {e}")
+    
+    async def start_santa_conversation(self):
+        """Start the Santa conversation phase"""
+        self.phase = "santa"
+        
+        # Elf hands off to Santa
+        await self.speak_elf(
+            f"Oh! {self.child_name}! Santa is ready to talk to you now! "
+            "Here he comes!"
+        )
+        
+        # Play jingle bells for Santa's arrival
+        await self.play_audio_file(JINGLE_AUDIO)
+        
+        # Notify frontend Santa is here
+        await self.send_data({"type": "phase_change", "phase": "santa"})
+        
+        await asyncio.sleep(0.5)
+        
+        # Santa greeting
+        child_term = "boy" if self.gender == "boy" else "girl"
+        
+        await self.speak_santa(
+            f"Ho Ho Ho! Hello {self.child_name}! "
+            f"Merry Christmas! I've heard you've been a very good {child_term} this year!"
+        )
+        
+        await asyncio.sleep(0.5)
+        
+        # Mention activities
+        if self.activities_completed:
+            activity_mentions = []
+            if "feed_reindeer" in self.activities_completed:
+                activity_mentions.append("feeding my reindeer")
+            if "decorate_tree" in self.activities_completed:
+                activity_mentions.append("decorating the tree")
+            if "ring_bells" in self.activities_completed:
+                activity_mentions.append("ringing the sleigh bells")
+            
+            if activity_mentions:
+                await self.speak_santa(
+                    f"Jingle told me you had lots of fun {' and '.join(activity_mentions)}! "
+                    "The elves and reindeer just love helpers like you!"
+                )
+        
+        await asyncio.sleep(0.5)
+        
+        # Ask about wishes
+        await self.speak_santa(
+            "Now tell me, what would you like for Christmas?"
+        )
+        
+        # Give child time to respond (in real implementation, use STT)
+        await asyncio.sleep(10)
+        
+        # Santa's response
+        await self.speak_santa(
+            f"Those are wonderful wishes! "
+            f"I will talk to your {self.relationship} to make sure everything is ready. "
+            "Remember to be good and get lots of sleep on Christmas Eve!"
+        )
+        
+        await asyncio.sleep(0.5)
+        
+        # Goodbye
+        await self.speak_santa(
+            f"Merry Christmas {self.child_name}! Ho Ho Ho! "
+            "See you soon!"
+        )
+        
+        # Play final jingles
+        await self.play_audio_file(JINGLE_AUDIO)
+        
+        # Notify end
+        self.phase = "ended"
+        await self.send_data({"type": "phase_change", "phase": "ended"})
+        
+        logger.info("Santa conversation completed!")
     
     async def run(self):
-        """Main conversation flow"""
+        """Main agent loop"""
         logger.info(f"🎅 Santa Agent starting in room: {self.room.name}")
         
-        # Wait for participant to join
+        # Wait for participant
         await asyncio.sleep(1)
         
         # Parse metadata
         self.parse_metadata()
         
-        # Set up audio and TTS
+        # Setup
         await self.setup_audio()
         await self.setup_tts()
-        await self.setup_stt()
         
-        # Update status to active
-        await self.update_call_status("active")
+        # Register data handler
+        @self.room.on("data_received")
+        def on_data(data: rtc.DataPacket):
+            asyncio.create_task(self.handle_data_message(data.data))
         
-        # Get gender-specific terms
-        child_term = "boy" if self.gender == "boy" else "girl"
-        
-        # ===== THE MAGICAL CONVERSATION =====
-        
-        # 1. Play jingle bells to set the mood
+        # Initial elf greeting
         await self.play_audio_file(JINGLE_AUDIO)
         
-        # 2. Elf Greeting (cheerful and upbeat)
-        await self.speak(
-            f"Hello {self.child_name}! I'm Jingle the Elf! "
-            f"Ooh, Santa is going to be SO excited to talk to you! Let me get him!",
-            voice="elf"
+        await self.speak_elf(
+            f"Hello {self.child_name}! Welcome to Santa's Workshop! "
+            f"I'm Jingle the Elf! While Santa gets ready, "
+            "why don't you explore and have some fun? "
+            "Pick an activity to try!"
         )
         
-        # 3. Play jingle bells while "getting Santa"
-        await self.play_audio_file(JINGLE_AUDIO)
+        # Wait for conversation to complete or timeout
+        timeout = 300  # 5 minutes max
+        start_time = asyncio.get_event_loop().time()
         
-        # 4. Santa Greeting
-        await self.speak(
-            f"Ho Ho Ho! Hello {self.child_name}! "
-            f"I've heard you've been a very good {child_term} this year!",
-            voice="santa"
-        )
+        while self.call_active and self.phase != "ended":
+            await asyncio.sleep(1)
+            
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                logger.info("Call timeout reached")
+                break
+            
+            # Check if room still has participants
+            if len(self.room.remote_participants) == 0:
+                logger.info("No more participants, ending call")
+                break
         
-        await asyncio.sleep(0.5)
-        
-        # 5. Ask about Christmas wishes
-        await self.speak(
-            "What would you like for Christmas?",
-            voice="santa"
-        )
-        
-        # 6. Listen to the child
-        await asyncio.sleep(8)  # Give them time to respond
-        
-        # Note: In a full implementation, we'd use STT here
-        # For now, we'll proceed with the flow
-        
-        # 7. Thinking music
-        await self.speak(
-            "Let me check my list...",
-            voice="santa"
-        )
-        await self.play_audio_file(THINKING_AUDIO)
-        
-        # 8. Santa's response
-        await self.speak(
-            f"I've checked my list and you have some wonderful gifts coming! "
-            f"I will check with your {self.relationship} to make sure everything is ready!",
-            voice="santa"
-        )
-        
-        await asyncio.sleep(0.5)
-        
-        # 9. Goodbye
-        await self.speak(
-            f"Merry Christmas {self.child_name}! Ho Ho Ho!",
-            voice="santa"
-        )
-        
-        # Update call as completed
-        await self.update_call_status("completed", self.gift_wishes)
-        
-        logger.info("🎅 Santa conversation completed!")
-        
-        # Keep connection open briefly for audio to finish
-        await asyncio.sleep(2)
+        logger.info("🎅 Santa Agent finished")
 
 
 # =============================================================================
-# LIVEKIT AGENT ENTRY POINTS
+# LIVEKIT ENTRY POINTS
 # =============================================================================
 
 async def entrypoint(ctx: JobContext):
-    """Main entry point for the agent"""
+    """Main entry point"""
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    logger.info(f"🎅 Connected to room: {ctx.room.name}")
     
-    logger.info(f"🎅 Call Santa agent connected to room: {ctx.room.name}")
-    
-    # Wait for a participant to join
     await asyncio.sleep(1)
     
-    # Create and run the Santa agent
     agent = SantaAgent(ctx)
     await agent.run()
 
 
 async def request_handler(req: JobRequest):
-    """Handle incoming job requests"""
+    """Handle job requests"""
     try:
         metadata = json.loads(req.room.metadata or "{}")
     except:
@@ -452,24 +496,19 @@ async def request_handler(req: JobRequest):
     agent_type = metadata.get("agent_type", "").lower()
     agent_name = metadata.get("agent_name", "")
     
-    # Accept santa calls
     if agent_type == "santa" or agent_name == "call-santa" or "santa" in req.room.name.lower():
-        logger.info(f"🎅 Accepting Santa call: {req.room.name}")
+        logger.info(f"🎅 Accepting call: {req.room.name}")
         await req.accept()
     else:
-        logger.info(f"❌ Rejecting non-Santa call: {req.room.name} (type: {agent_type})")
+        logger.info(f"❌ Rejecting: {req.room.name}")
         await req.reject()
 
 
-# =============================================================================
-# MAIN
-# =============================================================================
-
 if __name__ == "__main__":
-    logger.info("🎅 Call Santa Agent Starting...")
+    logger.info("🎅 Call Santa Agent v2 Starting...")
     logger.info(f"   LiveKit: {LIVEKIT_URL}")
-    logger.info(f"   Supabase: {SUPABASE_URL}")
-    logger.info(f"   Deepgram API Key: {'✓' if DEEPGRAM_API_KEY else '✗'}")
+    logger.info(f"   Deepgram: {'✓' if DEEPGRAM_API_KEY else '✗'}")
+    logger.info(f"   ElevenLabs: {'✓' if ELEVENLABS_API_KEY else '✗'}")
     
     cli.run_app(
         WorkerOptions(
