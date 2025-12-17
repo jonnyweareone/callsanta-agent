@@ -56,9 +56,9 @@ AUDIO_DIR = Path(__file__).parent / "audio"
 JINGLE_AUDIO = AUDIO_DIR / "christmas-sleigh-bells-jingling-451852.mp3"
 THINKING_AUDIO = AUDIO_DIR / "christmas-themed-riser-451859.mp3"
 
-# Voice configurations
-SANTA_VOICE = "aura-orion-en"      # Deep male voice for Santa
-ELF_VOICE = "aura-arcas-en"        # Warm male voice for Happy the Elf
+# Voice configurations - Using Aura-2 voices
+SANTA_VOICE = "aura-2-orion-en"    # Deep male voice for Santa
+ELF_VOICE = "aura-2-arcas-en"      # Warm male voice for Happy the Elf
 
 
 # =============================================================================
@@ -305,17 +305,20 @@ class SantaAgent:
         
         # ===== THE MAGICAL CONVERSATION =====
         
-        # 1. Elf Greeting
+        # 1. Play jingle bells to set the mood
+        await self.play_audio_file(JINGLE_AUDIO)
+        
+        # 2. Elf Greeting
         await self.speak(
             f"Hi there {self.child_name}! I'm Happy the Elf! "
             f"Santa is just in his workshop. Let me see if he's free!",
             voice="elf"
         )
         
-        # 2. Play jingle bells
+        # 3. Play jingle bells while "getting Santa"
         await self.play_audio_file(JINGLE_AUDIO)
         
-        # 3. Santa Greeting
+        # 4. Santa Greeting
         await self.speak(
             f"Ho Ho Ho! Hello {self.child_name}! "
             f"I've heard you've been a very good {child_term} this year!",
@@ -324,26 +327,26 @@ class SantaAgent:
         
         await asyncio.sleep(0.5)
         
-        # 4. Ask about Christmas wishes
+        # 5. Ask about Christmas wishes
         await self.speak(
             "What would you like for Christmas?",
             voice="santa"
         )
         
-        # 5. Listen to the child
+        # 6. Listen to the child
         await asyncio.sleep(8)  # Give them time to respond
         
         # Note: In a full implementation, we'd use STT here
         # For now, we'll proceed with the flow
         
-        # 6. Thinking music
+        # 7. Thinking music
         await self.speak(
             "Let me check my list...",
             voice="santa"
         )
         await self.play_audio_file(THINKING_AUDIO)
         
-        # 7. Santa's response
+        # 8. Santa's response
         await self.speak(
             f"I've checked my list and you have some wonderful gifts coming! "
             f"I will check with your {self.relationship} to make sure everything is ready!",
@@ -352,7 +355,7 @@ class SantaAgent:
         
         await asyncio.sleep(0.5)
         
-        # 8. Goodbye
+        # 9. Goodbye
         await self.speak(
             f"Merry Christmas {self.child_name}! Ho Ho Ho!",
             voice="santa"
