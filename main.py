@@ -56,9 +56,9 @@ AUDIO_DIR = Path(__file__).parent / "audio"
 JINGLE_AUDIO = AUDIO_DIR / "christmas-sleigh-bells-jingling-451852.mp3"
 THINKING_AUDIO = AUDIO_DIR / "christmas-themed-riser-451859.mp3"
 
-# Voice configurations - Using Aura-2 voices
-SANTA_VOICE = "aura-2-orion-en"    # Deep male voice for Santa
-ELF_VOICE = "aura-2-arcas-en"      # Warm male voice for Happy the Elf
+# Voice configurations - Deepgram Aura voices
+SANTA_VOICE = "aura-orion-en"      # Deep male voice for Santa
+ELF_VOICE = "aura-arcas-en"        # Warm male voice for Happy the Elf
 
 
 # =============================================================================
@@ -168,16 +168,18 @@ class SantaAgent:
         logger.info(f"[{voice.upper()}] Speaking: {text}")
         
         try:
-            # Generate and stream audio
-            async for event in tts.synthesize(text):
-                if hasattr(event, 'frame') and event.frame:
-                    await self.audio_source.capture_frame(event.frame)
+            # Generate and stream audio using ChunkedStream
+            stream = tts.synthesize(text)
+            async for audio in stream:
+                # SynthesizedAudio has a 'frame' attribute with AudioFrame
+                if audio.frame:
+                    await self.audio_source.capture_frame(audio.frame)
                     
             # Small pause after speaking
             await asyncio.sleep(0.3)
             
         except Exception as e:
-            logger.error(f"TTS error: {e}")
+            logger.error(f"TTS error: {e}", exc_info=True)
     
     async def play_audio_file(self, file_path: Path):
         """Play an audio file (MP3) through the audio track"""
