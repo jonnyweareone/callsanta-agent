@@ -56,9 +56,13 @@ AUDIO_DIR = Path(__file__).parent / "audio"
 JINGLE_AUDIO = AUDIO_DIR / "christmas-sleigh-bells-jingling-451852.mp3"
 THINKING_AUDIO = AUDIO_DIR / "christmas-themed-riser-451859.mp3"
 
-# Voice configurations - Deepgram Aura voices
-SANTA_VOICE = "aura-orion-en"      # Deep male voice for Santa
-ELF_VOICE = "aura-arcas-en"        # Warm male voice for Happy the Elf
+# Voice configurations - Deepgram Aura-2 voices
+SANTA_VOICE = "aura-2-draco-en"    # British, Warm, Baritone - perfect for Santa
+ELF_VOICE = "aura-2-iris-en"       # Young Adult, Cheerful, Positive - perfect for an elf
+
+# Santa voice modifications
+SANTA_PITCH_SEMITONES = -3   # Lower pitch (negative = deeper)
+SANTA_SPEED_FACTOR = 0.85    # Slower speech (< 1 = slower)
 
 
 # =============================================================================
@@ -168,13 +172,60 @@ class SantaAgent:
         logger.info(f"[{voice.upper()}] Speaking: {text}")
         
         try:
-            # Generate and stream audio using ChunkedStream
+            from pydub import AudioSegment
+            import io
+            
+            # Collect all audio frames
+            audio_data = bytearray()
             stream = tts.synthesize(text)
+            sample_rate = 24000
+            
             async for audio in stream:
-                # SynthesizedAudio has a 'frame' attribute with AudioFrame
                 if audio.frame:
-                    await self.audio_source.capture_frame(audio.frame)
-                    
+                    audio_data.extend(audio.frame.data)
+                    sample_rate = audio.frame.sample_rate
+            
+            if not audio_data:
+                logger.warning("No audio data received from TTS")
+                return
+            
+            # Convert to AudioSegment for processing
+            audio_segment = AudioSegment(
+                data=bytes(audio_data),
+                sample_width=2,  # 16-bit
+                frame_rate=sample_rate,
+                channels=1
+            )
+            
+            # Apply modifications for Santa (deeper & slower)
+            if voice == "santa":
+                # Pitch down (negative semitones = deeper voice)
+                new_sample_rate = int(audio_segment.frame_rate * (2 ** (SANTA_PITCH_SEMITONES / 12.0)))
+                pitched = audio_segment._spawn(audio_segment.raw_data, overrides={'frame_rate': new_sample_rate})
+                pitched = pitched.set_frame_rate(24000)  # Resample back to 24kHz
+                
+                # Slow down by stretching (change speed without affecting pitch further)
+                # We do this by adjusting frame rate then resampling
+                slowed_rate = int(24000 * SANTA_SPEED_FACTOR)
+                slowed = pitched._spawn(pitched.raw_data, overrides={'frame_rate': slowed_rate})
+                audio_segment = slowed.set_frame_rate(24000)
+            
+            # Stream the processed audio
+            raw_data = audio_segment.raw_data
+            samples_per_frame = 480  # 20ms at 24kHz
+            
+            for i in range(0, len(raw_data), samples_per_frame * 2):
+                chunk = raw_data[i:i + samples_per_frame * 2]
+                if len(chunk) == samples_per_frame * 2:
+                    frame = rtc.AudioFrame(
+                        data=chunk,
+                        sample_rate=24000,
+                        num_channels=1,
+                        samples_per_channel=samples_per_frame
+                    )
+                    await self.audio_source.capture_frame(frame)
+                    await asyncio.sleep(0.02)
+            
             # Small pause after speaking
             await asyncio.sleep(0.3)
             
@@ -311,10 +362,10 @@ class SantaAgent:
         # 1. Play jingle bells to set the mood
         await self.play_audio_file(JINGLE_AUDIO)
         
-        # 2. Elf Greeting
+        # 2. Elf Greeting (cheerful and upbeat)
         await self.speak(
-            f"Hi there {self.child_name}! I'm Happy the Elf! "
-            f"Santa is just in his workshop. Let me see if he's free!",
+            f"Hello {self.child_name}! I'm Jingle the Elf! "
+            f"Ooh, Santa is going to be SO excited to talk to you! Let me get him!",
             voice="elf"
         )
         
